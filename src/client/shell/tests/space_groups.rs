@@ -187,8 +187,16 @@ fn manual_space_groups_collapse_keeps_focus_and_hidden_attention() {
     state.set_snapshot(Box::new(snapshot));
     state.compose(106, 40).unwrap();
     let rect = state.hits.space_groups[0].0;
-    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+    let down = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
+        column: rect.x + 2,
+        row: rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(down.actions.is_empty());
+    assert_eq!(order(&state), ["ws_1", "ws_2", "ws_3"]);
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
         column: rect.x + 2,
         row: rect.y,
         modifiers: KeyModifiers::empty(),
@@ -462,7 +470,7 @@ fn manual_space_groups_keyboard_order_and_header_inclusive_scrolling_agree() {
         15
     );
     assert!(
-        !state.endpoint_workspace_is_draggable(&ClientWorkspacePress {
+        state.endpoint_workspace_is_draggable(&ClientWorkspacePress {
             endpoint_id: ClientEndpointId::Local,
             workspace_id: "ws_1".into(),
             start_column: 1,
@@ -542,4 +550,558 @@ fn manual_space_groups_render_scale_profile() {
             );
         }
     }
+}
+
+fn mouse(
+    state: &mut ClientShellState,
+    kind: MouseEventKind,
+    point: (u16, u16),
+) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+fn drag(state: &mut ClientShellState, from: Rect, to: (u16, u16)) -> ClientShellInput {
+    mouse(
+        state,
+        MouseEventKind::Down(MouseButton::Left),
+        (from.x + 4, from.y),
+    );
+    mouse(state, MouseEventKind::Drag(MouseButton::Left), to);
+    mouse(state, MouseEventKind::Up(MouseButton::Left), to)
+}
+
+fn group_names(state: &ClientShellState) -> Vec<&str> {
+    state
+        .space_groups
+        .get(&ClientEndpointId::Local)
+        .iter()
+        .map(|group| group.name.as_str())
+        .collect()
+}
+
+#[test]
+fn manual_space_groups_drag_headers_reorders_without_toggling_and_persists() {
+    let root = std::env::temp_dir().join(format!("herdr-group-drag-{}", std::process::id()));
+    let path = root.join("preferences.json");
+    let mut state = group_state(4);
+    state.config.preferences_path = Some(path.clone());
+    for (workspace, name) in [("ws_1", "First"), ("ws_2", "Second"), ("ws_3", "Third")] {
+        create(&mut state, &ClientEndpointId::Local, workspace, name);
+    }
+    state.toggle_space_group(
+        &ClientEndpointId::Local,
+        "Second",
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 40).unwrap();
+    let first = state.hits.space_groups[0].0;
+    let third = state.hits.space_groups[2].0;
+    let outcome = drag(&mut state, third, (first.x + 4, first.y));
+    assert!(outcome.actions.is_empty());
+    assert!(outcome.requests.is_empty());
+    assert_eq!(group_names(&state), ["Third", "First", "Second"]);
+    assert!(state.space_groups.get(&ClientEndpointId::Local)[2].collapsed);
+    assert!(!state.space_groups.get(&ClientEndpointId::Local)[0].collapsed);
+    state.compose(106, 40).unwrap();
+    let first = state.hits.space_groups[0].0;
+    let last = state.hits.space_groups[2].0;
+    drag(&mut state, first, (last.x + 4, last.bottom()));
+    assert_eq!(group_names(&state), ["First", "Second", "Third"]);
+
+    let mut restored = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path),
+    );
+    restored.set_snapshot(Box::new(state.snapshot.as_deref().unwrap().clone()));
+    assert_eq!(group_names(&restored), group_names(&state));
+    assert!(restored.space_groups.get(&ClientEndpointId::Local)[1].collapsed);
+    assert_eq!(order(&restored), ["ws_1", "ws_3", "ws_4"]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn manual_space_groups_drag_projects_within_group_and_ungrouped_uses_existing_api() {
+    for grouped in [false, true] {
+        let mut state = group_state(5);
+        create(&mut state, &ClientEndpointId::Local, "ws_2", "Work");
+        for id in ["ws_4", "ws_5"] {
+            state.assign_space_group(
+                &ClientEndpointId::Local,
+                id,
+                Some("Work"),
+                &mut ClientShellInput::default(),
+            );
+        }
+        state.compose(106, 40).unwrap();
+        let (source, last) = if grouped {
+            ("ws_2", "ws_5")
+        } else {
+            ("ws_1", "ws_3")
+        };
+        let from = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == source)
+            .unwrap()
+            .rect;
+        let to = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == last)
+            .unwrap()
+            .rect;
+        let moved = drag(&mut state, from, (to.x + 4, to.bottom()));
+        assert!(
+            matches!(&moved.actions[..], [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+                if params.workspace_id == source && params.insert_index == 5))
+        );
+        assert_eq!(
+            state
+                .space_groups
+                .workspace_group(&ClientEndpointId::Local, source),
+            grouped.then_some(0)
+        );
+
+        // A server snapshot carries the resulting workspace order; groups only project it.
+        let mut snapshot = state.snapshot.as_deref().unwrap().clone();
+        let index = snapshot
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.workspace_id == source)
+            .unwrap();
+        let workspace = snapshot.workspaces.remove(index);
+        snapshot.workspaces.push(workspace);
+        state.set_snapshot(Box::new(snapshot));
+        assert_eq!(
+            order(&state),
+            if grouped {
+                ["ws_4", "ws_5", "ws_2", "ws_1", "ws_3"]
+            } else {
+                ["ws_2", "ws_4", "ws_5", "ws_3", "ws_1"]
+            }
+        );
+        state.compose(106, 40).unwrap();
+        let from = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == source)
+            .unwrap()
+            .rect;
+        let target = if grouped { "ws_4" } else { "ws_3" };
+        let to = state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == target)
+            .unwrap()
+            .rect;
+        let moved = drag(&mut state, from, (to.x + 4, to.y));
+        let target_index = state
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.workspace_id == target)
+            .unwrap();
+        assert!(
+            matches!(&moved.actions[..], [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+                if params.workspace_id == source && params.insert_index == target_index))
+        );
+    }
+}
+
+#[test]
+fn manual_space_groups_drag_release_outside_cancels_and_does_not_change_membership() {
+    let mut state = group_state(4);
+    create(&mut state, &ClientEndpointId::Local, "ws_1", "Work");
+    create(&mut state, &ClientEndpointId::Local, "ws_2", "Other");
+    state.compose(106, 40).unwrap();
+    for header in [false, true] {
+        let from = if header {
+            state.hits.space_groups[1].0
+        } else {
+            state.hits.workspaces[3].rect
+        };
+        let target = if header {
+            state.hits.space_groups[0].0
+        } else {
+            state.hits.workspaces[2].rect
+        };
+        mouse(
+            &mut state,
+            MouseEventKind::Down(MouseButton::Left),
+            (from.x + 4, from.y),
+        );
+        mouse(
+            &mut state,
+            MouseEventKind::Drag(MouseButton::Left),
+            (target.x + 4, target.y),
+        );
+        assert!(state.chrome_drag.is_some());
+        let outcome = mouse(
+            &mut state,
+            MouseEventKind::Up(MouseButton::Left),
+            (100, target.y),
+        );
+        assert!(outcome.actions.is_empty());
+        assert!(state.chrome_drag.is_none());
+        assert_eq!(group_names(&state), ["Work", "Other"]);
+        assert_eq!(order(&state), ["ws_1", "ws_2", "ws_3", "ws_4"]);
+    }
+    let foreign = state.hits.workspaces[0].rect;
+    assert!(state
+        .grouped_workspace_drop_target_at("ws_3", (foreign.x + 4, foreign.y))
+        .is_none());
+    assert!(state
+        .grouped_workspace_drop_target_at("ws_1", (foreign.x + 4, state.hits.workspaces[3].rect.y))
+        .is_none());
+}
+
+#[test]
+fn manual_space_groups_drag_preserves_worktree_block_and_rejects_children() {
+    let mut state = group_state(4);
+    let mut snapshot = state.snapshot.as_deref().unwrap().clone();
+    for index in [0, 2] {
+        snapshot.workspaces[index].worktree = Some(ClientShellWorktree {
+            key: "/repo".into(),
+            label: "repo".into(),
+            is_linked_worktree: index == 2,
+        });
+    }
+    state.set_snapshot(Box::new(snapshot));
+    create(&mut state, &ClientEndpointId::Local, "ws_1", "Work");
+    state.assign_space_group(
+        &ClientEndpointId::Local,
+        "ws_2",
+        Some("Work"),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 40).unwrap();
+    let parent = state.hits.workspaces[0].rect;
+    let child = state.hits.workspaces[1].rect;
+    let other = state.hits.workspaces[2].rect;
+    let outcome = drag(&mut state, parent, (other.x + 4, other.bottom()));
+    assert!(
+        matches!(&outcome.actions[..], [ClientShellAction::Endpoint { request, .. }]
+        if matches!(&request.method, crate::api::schema::Method::WorkspaceMoveBlock(params)
+            if params.workspace_ids == ["ws_1", "ws_3"] && params.before_workspace_id.is_none()))
+    );
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        (child.x + 4, child.y),
+    );
+    mouse(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        (other.x + 4, other.bottom()),
+    );
+    assert!(state.chrome_drag.is_none());
+}
+
+#[test]
+fn manual_space_groups_drag_scrolled_headers_and_multiline_projects_use_visible_slots() {
+    let mut state = group_state(16);
+    for number in 1..=16 {
+        create(
+            &mut state,
+            &ClientEndpointId::Local,
+            &format!("ws_{number}"),
+            &format!("Group {number}"),
+        );
+    }
+    state.compose(106, 24).unwrap();
+    state.workspace_scroll = 8;
+    state.compose(106, 24).unwrap();
+    let first = state.hits.space_groups.first().unwrap();
+    let before = first.2.clone();
+    assert_ne!(before, "Group 1");
+    let to = first.0;
+    let last = state.hits.space_groups.last().unwrap();
+    let source = last.2.clone();
+    let from = last.0;
+    drag(&mut state, from, (to.x + 4, to.y));
+    let names = group_names(&state);
+    let position = names.iter().position(|name| *name == before).unwrap();
+    assert_eq!(names[position - 1], source);
+    assert_eq!(names[0], "Group 1");
+
+    let mut state = group_state(4);
+    create(&mut state, &ClientEndpointId::Local, "ws_1", "Work");
+    state.config.spaces.row_gap = 1;
+    state.config.spaces.rows = vec![
+        vec![crate::config::SpaceSidebarToken::Workspace],
+        vec![crate::config::SpaceSidebarToken::StateText],
+    ];
+    state.compose(106, 40).unwrap();
+    let from = state.hits.workspaces[3].rect;
+    let to = state.hits.workspaces[1].rect;
+    assert_eq!(from.height, 2);
+    let outcome = drag(&mut state, from, (to.x + 4, to.y));
+    assert!(
+        matches!(&outcome.actions[..], [ClientShellAction::Endpoint { request, .. }]
+        if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+            if params.workspace_id == "ws_4" && params.insert_index == 1))
+    );
+}
+
+#[test]
+fn manual_space_groups_drag_is_endpoint_scoped_with_identical_names_and_ids() {
+    let mut state = group_state(3);
+    let profile = SavedSshEndpoint {
+        id: crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(
+        &remote,
+        Box::new(state.snapshot.as_deref().unwrap().clone()),
+    );
+    for endpoint in [ClientEndpointId::Local, remote.clone()] {
+        create(&mut state, &endpoint, "ws_1", "First");
+        create(&mut state, &endpoint, "ws_2", "Second");
+    }
+    state.compose(106, 50).unwrap();
+    let local = state
+        .hits
+        .space_groups
+        .iter()
+        .find(|(_, endpoint, _)| endpoint.is_local())
+        .unwrap()
+        .0;
+    let from = state
+        .hits
+        .space_groups
+        .iter()
+        .find(|(_, endpoint, name)| endpoint == &remote && name == "Second")
+        .unwrap()
+        .0;
+    let to = state
+        .hits
+        .space_groups
+        .iter()
+        .find(|(_, endpoint, name)| endpoint == &remote && name == "First")
+        .unwrap()
+        .0;
+    assert!(state
+        .space_group_drop_target_at(&remote, "Second", (local.x + 4, local.y))
+        .is_none());
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        (from.x + 4, from.y),
+    );
+    mouse(
+        &mut state,
+        MouseEventKind::Drag(MouseButton::Left),
+        (to.x + 4, to.y),
+    );
+    let frame = state.compose(106, 50).unwrap();
+    assert!(frame
+        .cells
+        .chunks(frame.width as usize)
+        .nth(to.y as usize)
+        .unwrap()
+        .iter()
+        .take(20)
+        .any(|cell| cell.symbol == "\u{2500}"));
+    let outcome = mouse(
+        &mut state,
+        MouseEventKind::Up(MouseButton::Left),
+        (to.x + 4, to.y),
+    );
+    assert!(outcome.actions.is_empty());
+    assert_eq!(group_names(&state), ["First", "Second"]);
+    assert_eq!(state.space_groups.get(&remote)[0].name, "Second");
+    assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+}
+
+#[test]
+fn manual_space_groups_drag_adjacent_project_rows_swaps_without_overshooting() {
+    for grouped in [false, true] {
+        for row_gap in [0, 1] {
+            for multiline in [false, true] {
+                for (source, target) in [(1, 2), (2, 1), (2, 3), (3, 2)] {
+                    let mut state = group_state(4);
+                    create(&mut state, &ClientEndpointId::Local, "ws_4", "Work");
+                    if grouped {
+                        for number in 1..=3 {
+                            state.assign_space_group(
+                                &ClientEndpointId::Local,
+                                &format!("ws_{number}"),
+                                Some("Work"),
+                                &mut ClientShellInput::default(),
+                            );
+                        }
+                    }
+                    state.config.spaces.row_gap = row_gap;
+                    if multiline {
+                        state.config.spaces.rows = vec![
+                            vec![crate::config::SpaceSidebarToken::Workspace],
+                            vec![crate::config::SpaceSidebarToken::StateText],
+                        ];
+                    }
+                    state.compose(106, 40).unwrap();
+                    let rect = |number| {
+                        state
+                            .hits
+                            .workspaces
+                            .iter()
+                            .find(|hit| hit.workspace_id == format!("ws_{number}"))
+                            .unwrap()
+                            .rect
+                    };
+                    let from = rect(source);
+                    let to = rect(target);
+                    mouse(
+                        &mut state,
+                        MouseEventKind::Down(MouseButton::Left),
+                        (from.x + 4, from.y),
+                    );
+                    mouse(
+                        &mut state,
+                        MouseEventKind::Drag(MouseButton::Left),
+                        (to.x + 4, to.y),
+                    );
+                    let expected_indicator = if source < target { to.bottom() } else { to.y };
+                    assert!(matches!(&state.chrome_drag,
+                        Some(ClientChromeDrag::Workspace { target: Some((_, row)), .. })
+                            if *row == expected_indicator),
+                        "grouped={grouped}, gap={row_gap}, multiline={multiline}, {source}->{target}");
+                    let outcome = mouse(
+                        &mut state,
+                        MouseEventKind::Up(MouseButton::Left),
+                        (to.x + 4, to.y),
+                    );
+                    let expected_index = if source < target {
+                        if target == 3 && !grouped {
+                            4
+                        } else {
+                            target
+                        }
+                    } else {
+                        target - 1
+                    };
+                    assert!(
+                        matches!(&outcome.actions[..], [ClientShellAction::Endpoint { request, .. }]
+                        if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+                            if params.workspace_id == format!("ws_{source}") && params.insert_index == expected_index))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn manual_space_groups_drag_adjacent_headers_swaps_without_overshooting() {
+    for collapsed in [false, true] {
+        for (source, target, expected) in [
+            (0, 1, ["Second", "First", "Third"]),
+            (1, 0, ["Second", "First", "Third"]),
+            (1, 2, ["First", "Third", "Second"]),
+        ] {
+            let mut state = group_state(4);
+            for (id, name) in [("ws_1", "First"), ("ws_2", "Second"), ("ws_3", "Third")] {
+                create(&mut state, &ClientEndpointId::Local, id, name);
+                if collapsed {
+                    state.toggle_space_group(
+                        &ClientEndpointId::Local,
+                        name,
+                        &mut ClientShellInput::default(),
+                    );
+                }
+            }
+            state.compose(106, 40).unwrap();
+            let from = state.hits.space_groups[source].0;
+            let to = state.hits.space_groups[target].0;
+            let outcome = drag(&mut state, from, (to.x + 4, to.y));
+            assert!(outcome.actions.is_empty());
+            assert_eq!(
+                group_names(&state),
+                expected,
+                "collapsed={collapsed}, {source}->{target}"
+            );
+            assert!(state
+                .space_groups
+                .get(&ClientEndpointId::Local)
+                .iter()
+                .all(|group| group.collapsed == collapsed));
+        }
+    }
+}
+
+#[test]
+fn manual_space_groups_drag_hovering_worktree_rows_targets_the_whole_family() {
+    let mut state = group_state(5);
+    let mut snapshot = state.snapshot.as_deref().unwrap().clone();
+    for index in [1, 3] {
+        snapshot.workspaces[index].worktree = Some(ClientShellWorktree {
+            key: "/repo".into(),
+            label: "repo".into(),
+            is_linked_worktree: index == 3,
+        });
+    }
+    state.set_snapshot(Box::new(snapshot));
+    create(&mut state, &ClientEndpointId::Local, "ws_5", "Work");
+    state.config.spaces.rows = vec![
+        vec![crate::config::SpaceSidebarToken::Workspace],
+        vec![crate::config::SpaceSidebarToken::StateText],
+    ];
+    state.compose(106, 40).unwrap();
+    let rect = |id| {
+        state
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| hit.workspace_id == id)
+            .unwrap()
+            .rect
+    };
+    let before = rect("ws_1");
+    let parent = rect("ws_2");
+    let child = rect("ws_4");
+    let after = rect("ws_3");
+    for to in [parent, child] {
+        for row in to.y..to.bottom() {
+            let point = (to.x + 4, row);
+            assert_eq!(
+                state.grouped_workspace_drop_target_at("ws_1", point),
+                Some((Some("ws_3".into()), child.bottom()))
+            );
+            assert_eq!(
+                state.grouped_workspace_drop_target_at("ws_3", point),
+                Some((Some("ws_2".into()), parent.y))
+            );
+            let down = drag(&mut state, before, point);
+            assert!(
+                matches!(&down.actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+                    if params.workspace_id == "ws_1" && params.insert_index == 2))
+            );
+            let up = drag(&mut state, after, point);
+            assert!(
+                matches!(&up.actions[..], [ClientShellAction::Endpoint { request, .. }]
+                if matches!(&request.method, crate::api::schema::Method::WorkspaceMove(params)
+                    if params.workspace_id == "ws_3" && params.insert_index == 1))
+            );
+        }
+    }
+    let unchanged = drag(&mut state, parent, (child.x + 4, child.y));
+    assert!(unchanged.actions.is_empty());
 }

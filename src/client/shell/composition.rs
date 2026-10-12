@@ -212,6 +212,11 @@ impl ClientShellState {
                 Some(source_workspace_id.as_str()),
                 target.as_ref().map(|(_, row)| *row),
             ),
+            Some(ClientChromeDrag::SpaceGroup {
+                target,
+                moved: true,
+                ..
+            }) => (None, target.as_ref().map(|(_, row)| *row)),
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));

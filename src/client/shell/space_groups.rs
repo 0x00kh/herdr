@@ -2,6 +2,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod drag;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct SpaceGroups {
     #[serde(flatten)]
@@ -46,6 +48,19 @@ fn pane_cwds(snapshot: &ClientShellSnapshot) -> HashMap<&str, Vec<&str>> {
 }
 
 impl SpaceGroups {
+    pub(super) fn workspace_group(
+        &self,
+        endpoint: &ClientEndpointId,
+        workspace_id: &str,
+    ) -> Option<usize> {
+        self.get(endpoint).iter().position(|group| {
+            group
+                .members
+                .iter()
+                .any(|member| member.workspace_id == workspace_id)
+        })
+    }
+
     pub(super) fn get(&self, endpoint: &ClientEndpointId) -> &[SpaceGroup] {
         self.endpoints
             .get(endpoint_key(endpoint))

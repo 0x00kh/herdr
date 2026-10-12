@@ -508,10 +508,13 @@ impl ClientShellState {
         Some(last_index + 1)
     }
 
-    fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
-        // Grouped order is client-owned, unlike the server's workspace order.
+    fn workspace_drop_target_at(
+        &self,
+        source: &str,
+        point: (u16, u16),
+    ) -> Option<(Option<String>, u16)> {
         if !self.space_groups.get(&self.active_endpoint_id).is_empty() {
-            return None;
+            return self.grouped_workspace_drop_target_at(source, point);
         }
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
@@ -616,6 +619,13 @@ impl ClientShellState {
                     .worktree
                     .as_ref()
                     .is_some_and(|worktree| worktree.is_linked_worktree)
+            })
+            .filter(|workspace| {
+                self.space_groups
+                    .workspace_group(&self.active_endpoint_id, &workspace.workspace_id)
+                    == self
+                        .space_groups
+                        .workspace_group(&self.active_endpoint_id, source_workspace_id)
             })
             .collect::<Vec<_>>();
         let source_position = roots
@@ -1208,12 +1218,35 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
-                Some(ClientChromeDrag::Workspace { .. }) => {
-                    let target = self.workspace_drop_target_at(point);
+                Some(ClientChromeDrag::Workspace {
+                    source_workspace_id,
+                    ..
+                }) => {
+                    let target = self.workspace_drop_target_at(source_workspace_id, point);
                     if let Some(ClientChromeDrag::Workspace {
                         target: current, ..
                     }) = self.chrome_drag.as_mut()
                     {
+                        *current = target;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                Some(ClientChromeDrag::SpaceGroup {
+                    endpoint_id,
+                    name,
+                    start,
+                    ..
+                }) => {
+                    let target = self.space_group_drop_target_at(endpoint_id, name, point);
+                    let moved = point != *start;
+                    if let Some(ClientChromeDrag::SpaceGroup {
+                        moved: current_moved,
+                        target: current,
+                        ..
+                    }) = self.chrome_drag.as_mut()
+                    {
+                        *current_moved |= moved;
                         *current = target;
                     }
                     outcome.repaint = true;
@@ -1230,7 +1263,9 @@ impl ClientShellState {
                     let source_workspace_id = press.workspace_id.clone();
                     let draggable = self.endpoint_workspace_is_draggable(press);
                     if draggable {
-                        if let Some(target) = self.workspace_drop_target_at(point) {
+                        if let Some(target) =
+                            self.workspace_drop_target_at(&source_workspace_id, point)
+                        {
                             self.chrome_drag = Some(ClientChromeDrag::Workspace {
                                 source_workspace_id,
                                 target: Some(target),
@@ -1299,15 +1334,45 @@ impl ClientShellState {
                     }
                     ClientChromeDrag::Workspace {
                         source_workspace_id,
-                        target,
+                        ..
                     } => {
-                        if let Some((before_workspace_id, _)) = target {
+                        if let Some((before_workspace_id, _)) =
+                            self.workspace_drop_target_at(&source_workspace_id, point)
+                        {
                             if let Some(method) = self.workspace_move_method(
                                 &source_workspace_id,
                                 before_workspace_id.as_deref(),
                             ) {
                                 self.push_endpoint_method(method, outcome);
                             }
+                        }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::SpaceGroup {
+                        endpoint_id,
+                        name,
+                        moved,
+                        ..
+                    } => {
+                        if moved {
+                            if let Some((before, _)) =
+                                self.space_group_drop_target_at(&endpoint_id, &name, point)
+                            {
+                                self.move_space_group(
+                                    &endpoint_id,
+                                    &name,
+                                    before.as_deref(),
+                                    outcome,
+                                );
+                            }
+                        } else if self.hits.space_groups.iter().any(
+                            |(rect, endpoint, candidate)| {
+                                endpoint == &endpoint_id
+                                    && candidate == &name
+                                    && super::contains(*rect, point)
+                            },
+                        ) {
+                            self.toggle_space_group(&endpoint_id, &name, outcome);
                         }
                         outcome.repaint = true;
                     }
@@ -2134,7 +2199,13 @@ impl ClientShellState {
                     .find(|(rect, _, _)| super::contains(*rect, point))
                     .cloned()
                 {
-                    self.toggle_space_group(&endpoint_id, &name, outcome);
+                    self.chrome_drag = Some(ClientChromeDrag::SpaceGroup {
+                        endpoint_id,
+                        name,
+                        start: point,
+                        moved: false,
+                        target: None,
+                    });
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

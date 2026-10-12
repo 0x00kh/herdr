@@ -217,6 +217,13 @@ pub(super) enum ClientChromeDrag {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
     },
+    SpaceGroup {
+        endpoint_id: ClientEndpointId,
+        name: String,
+        start: (u16, u16),
+        moved: bool,
+        target: Option<(Option<String>, u16)>,
+    },
     PaneSplit {
         hit: PaneSplitHit,
         tab_id: String,

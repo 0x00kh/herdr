@@ -13,7 +13,6 @@ impl ClientShellState {
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
         press.endpoint_id == self.active_endpoint_id
-            && self.space_groups.get(&press.endpoint_id).is_empty()
             && self
                 .snapshot
                 .as_deref()
