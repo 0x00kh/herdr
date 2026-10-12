@@ -509,6 +509,10 @@ impl ClientShellState {
     }
 
     fn workspace_drop_target_at(&self, point: (u16, u16)) -> Option<(Option<String>, u16)> {
+        // Grouped order is client-owned, unlike the server's workspace order.
+        if !self.space_groups.get(&self.active_endpoint_id).is_empty() {
+            return None;
+        }
         if self.hits.workspace_body.height == 0
             || point.1 < self.hits.workspace_body.y.saturating_sub(1)
             || point.1 >= self.hits.new_workspace.y
@@ -1422,6 +1426,14 @@ impl ClientShellState {
                 .find(|(rect, _)| super::contains(*rect, point))
                 .copied();
             match mouse.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    self.move_context_menu_selection(if mouse.kind == MouseEventKind::ScrollUp {
+                        -1
+                    } else {
+                        1
+                    });
+                    outcome.repaint = true;
+                }
                 MouseEventKind::Moved => {
                     if let (Some((_, index)), Some(ClientShellOverlay::ContextMenu(menu))) =
                         (row_hit, self.overlay.as_mut())
@@ -1835,6 +1847,33 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if let Some((_, endpoint_id, name)) = self
+                    .hits
+                    .space_groups
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .filter(|_| self.snapshot.is_some() && self.pane_surface.is_some())
+                {
+                    let collapsed = self
+                        .space_groups
+                        .get(endpoint_id)
+                        .iter()
+                        .any(|group| group.name == *name && group.collapsed);
+                    self.overlay =
+                        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                            target: ClientContextMenuTarget::SpaceGroup {
+                                endpoint_id: endpoint_id.clone(),
+                                name: name.clone(),
+                                collapsed,
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            highlighted: 0,
+                            scroll: 0,
+                        }));
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -2086,6 +2125,16 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                if let Some((_, endpoint_id, name)) = self
+                    .hits
+                    .space_groups
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    self.toggle_space_group(&endpoint_id, &name, outcome);
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

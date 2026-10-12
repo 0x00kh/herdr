@@ -270,7 +270,7 @@ pub(super) fn render_expanded(
         Endpoint(usize),
         Workspace {
             endpoint: usize,
-            entry: WorkspaceEntry,
+            row: super::space_groups::SpaceRow,
         },
     }
     let mut rows = Vec::new();
@@ -283,12 +283,16 @@ pub(super) fn render_expanded(
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
+                super::space_groups::rows(
+                    snapshot,
+                    collapsed_groups,
+                    state.space_groups.get(&endpoint.endpoint_id),
+                )
+                .into_iter()
+                .map(|row| Row::Workspace {
+                    endpoint: endpoint_index,
+                    row,
+                }),
             );
         }
     }
@@ -305,7 +309,10 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace { endpoint, row } => {
+                let Some(entry) = row.workspace() else {
+                    return 1;
+                };
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
@@ -342,9 +349,12 @@ pub(super) fn render_expanded(
                 Row::Workspace { endpoint, .. },
                 Some(Row::Workspace {
                     endpoint: next_endpoint,
-                    entry,
+                    row,
                 }),
-            ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
+            ) if endpoint == next_endpoint => {
+                u16::from(row.workspace().is_none_or(|entry| !entry.indented))
+                    * config.spaces.row_gap
+            }
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -352,7 +362,10 @@ pub(super) fn render_expanded(
     let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
     if reveal_navigation || reveal_focus {
         let selected_row = rows.iter().position(|row| match row {
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace { endpoint, row } => {
+                let Some(entry) = row.workspace() else {
+                    return false;
+                };
                 let endpoint = &state.endpoints[*endpoint];
                 endpoint
                     .snapshot
@@ -432,8 +445,24 @@ pub(super) fn render_expanded(
                     .saturating_add(1)
                     .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
             }
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace { endpoint, row } => {
+                if y >= body.bottom() {
+                    break;
+                }
                 let endpoint = &state.endpoints[*endpoint];
+                let super::space_groups::SpaceRow::Workspace { entry, grouped } = row else {
+                    super::space_groups::render_header(
+                        buffer,
+                        Rect::new(body.x + 2, y, content_width.saturating_sub(2), 1),
+                        row,
+                        state.space_groups.get(&endpoint.endpoint_id),
+                        &endpoint.endpoint_id,
+                        config,
+                        hits,
+                    );
+                    y = y.saturating_add(1 + gaps.get(row_index).copied().unwrap_or(0));
+                    continue;
+                };
                 let Some(snapshot) = endpoint.snapshot.as_deref() else {
                     continue;
                 };
@@ -459,9 +488,9 @@ pub(super) fn render_expanded(
                 }
                 let rect = Rect::new(body.x, y, content_width, height);
                 let nested = Rect::new(
-                    rect.x.saturating_add(2),
+                    rect.x.saturating_add(2 + u16::from(*grouped) * 2),
                     rect.y,
-                    rect.width.saturating_sub(2),
+                    rect.width.saturating_sub(2 + u16::from(*grouped) * 2),
                     rect.height,
                 );
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;

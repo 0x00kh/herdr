@@ -16,6 +16,8 @@ pub(super) struct ClientRemoteCollapsedGroups {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ClientChromePreferences {
+    #[serde(default)]
+    pub(super) space_groups: super::space_groups::SpaceGroups,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sidebar_width: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

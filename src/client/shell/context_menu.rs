@@ -4,8 +4,32 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: label.into(),
+            action,
+        };
+        let mut items = match &self.target {
+            ClientContextMenuTarget::MoveToSpaceGroup { groups, .. } => {
+                let mut items = vec![
+                    item("New group...", Action::NewSpaceGroup),
+                    item("Ungroup", Action::Ungroup),
+                ];
+                items.extend(groups.iter().enumerate().map(|(index, name)| {
+                    ClientContextMenuItem {
+                        label: name.clone().into(),
+                        action: Action::AssignSpaceGroup(index),
+                    }
+                }));
+                items
+            }
+            ClientContextMenuTarget::SpaceGroup { collapsed, .. } => vec![
+                item(
+                    if *collapsed { "Expand" } else { "Collapse" },
+                    Action::ToggleGroup,
+                ),
+                item("Rename group", Action::Rename),
+                item("Delete group (keep spaces)", Action::DeleteSpaceGroup),
+            ],
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -79,7 +103,11 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+        };
+        if matches!(self.target, ClientContextMenuTarget::Workspace { .. }) {
+            items.push(item("Move to group...", Action::MoveToSpaceGroup));
         }
+        items
     }
 }
 
@@ -120,6 +148,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            scroll: 0,
         }));
     }
 
@@ -139,6 +168,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            scroll: 0,
         }));
     }
 
@@ -164,6 +194,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            scroll: 0,
         }));
     }
 
@@ -192,11 +223,70 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::MoveToSpaceGroup {
+                endpoint_id,
+                workspace_id,
+                groups,
+            } => match action {
+                ClientContextMenuAction::NewSpaceGroup => {
+                    self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                        title: "new group",
+                        input: TextEditor::new("", false),
+                        target: ClientRenameTarget::SpaceGroup {
+                            endpoint_id,
+                            old_name: None,
+                            workspace_id: Some(workspace_id),
+                        },
+                    }));
+                }
+                ClientContextMenuAction::AssignSpaceGroup(index) => {
+                    if let Some(name) = groups.get(index) {
+                        self.assign_space_group(&endpoint_id, &workspace_id, Some(name), outcome);
+                    }
+                }
+                ClientContextMenuAction::Ungroup => {
+                    self.assign_space_group(&endpoint_id, &workspace_id, None, outcome)
+                }
+                _ => {}
+            },
+            ClientContextMenuTarget::SpaceGroup {
+                endpoint_id, name, ..
+            } => match action {
+                ClientContextMenuAction::ToggleGroup => {
+                    self.toggle_space_group(&endpoint_id, &name, outcome)
+                }
+                ClientContextMenuAction::DeleteSpaceGroup => {
+                    self.delete_space_group(&endpoint_id, &name, outcome)
+                }
+                ClientContextMenuAction::Rename => {
+                    self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                        title: "rename group",
+                        input: TextEditor::new(&name, false),
+                        target: ClientRenameTarget::SpaceGroup {
+                            endpoint_id,
+                            old_name: Some(name),
+                            workspace_id: None,
+                        },
+                    }));
+                }
+                _ => {}
+            },
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,
                 ..
-            } => self.activate_workspace_context_action(workspace_id, close_group, action, outcome),
+            } => {
+                if action == ClientContextMenuAction::MoveToSpaceGroup {
+                    self.open_move_to_group(workspace_id, menu.x, menu.y);
+                } else {
+                    self.activate_workspace_context_action(
+                        workspace_id,
+                        close_group,
+                        action,
+                        outcome,
+                    );
+                }
+            }
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,

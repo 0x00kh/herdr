@@ -83,6 +83,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) space_groups: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -295,6 +296,11 @@ pub(super) enum ClientShellOverlayKind {
 
 #[derive(Debug)]
 pub(super) enum ClientRenameTarget {
+    SpaceGroup {
+        endpoint_id: ClientEndpointId,
+        old_name: Option<String>,
+        workspace_id: Option<String>,
+    },
     NewWorkspace {
         source_workspace_id: Option<String>,
         cwd: Option<String>,
@@ -510,6 +516,11 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
+    MoveToSpaceGroup,
+    NewSpaceGroup,
+    AssignSpaceGroup(usize),
+    Ungroup,
+    DeleteSpaceGroup,
     Rename,
     Close,
     NewWorktree,
@@ -529,6 +540,16 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    SpaceGroup {
+        endpoint_id: ClientEndpointId,
+        name: String,
+        collapsed: bool,
+    },
+    MoveToSpaceGroup {
+        endpoint_id: ClientEndpointId,
+        workspace_id: String,
+        groups: Vec<String>,
+    },
     Workspace {
         workspace_id: String,
         is_git: bool,
@@ -556,10 +577,11 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) x: u16,
     pub(super) y: u16,
     pub(super) highlighted: usize,
+    pub(super) scroll: usize,
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 
@@ -881,6 +903,7 @@ pub(crate) struct ClientShellState {
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
+    pub(super) space_groups: super::space_groups::SpaceGroups,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
@@ -1055,6 +1078,7 @@ impl ClientShellState {
             workspace_press: None,
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
+            space_groups: preferences.space_groups,
             remote_collapsed_groups,
             workspace_scroll: 0,
             agent_scroll: 0,
@@ -1188,18 +1212,37 @@ impl ClientShellState {
         snapshot: &ClientShellSnapshot,
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
+        if self.sidebar_collapsed
+            && !self.mobile_layout_active()
+            && !self.space_groups.get(&self.active_endpoint_id).is_empty()
+        {
+            return (0..snapshot.workspaces.len())
+                .map(|index| WorkspaceEntry {
+                    index,
+                    indented: false,
+                    last_child: false,
+                })
+                .collect();
+        }
         if self.mobile_layout_active() {
             render::workspace_entries(snapshot, &empty_collapsed_groups)
         } else {
-            render::workspace_entries(
+            super::space_groups::visible_workspaces(
                 snapshot,
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
+                self.space_groups.get(&self.active_endpoint_id),
             )
         }
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
+        if !self.space_groups.get(&self.active_endpoint_id).is_empty()
+            && !self.mobile_layout_active()
+        {
+            self.reveal_focused_workspace = true;
+            return;
+        }
         if self
             .hits
             .workspaces

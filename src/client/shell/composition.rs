@@ -55,6 +55,7 @@ impl ClientShellState {
                     == Some(ClientEndpointStatus::Online)
         });
         let mut render_state = render::ShellRenderState {
+            space_groups: &self.space_groups,
             machine_diagnostics: &self.machine_diagnostics,
             endpoints: &self.endpoints,
             active_endpoint_id: &self.active_endpoint_id,
@@ -153,6 +154,15 @@ impl ClientShellState {
         rows: u16,
     ) -> Option<crate::client::frame_output::ComposedFrame> {
         self.last_composed_at = Some(std::time::Instant::now());
+        if let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
+            let height = usize::from(rows.saturating_sub(2)).max(1);
+            menu.scroll = menu.scroll.min(menu.items().len().saturating_sub(height));
+            if menu.highlighted < menu.scroll {
+                menu.scroll = menu.highlighted;
+            } else if menu.highlighted >= menu.scroll.saturating_add(height) {
+                menu.scroll = menu.highlighted.saturating_add(1).saturating_sub(height);
+            }
+        }
         self.selection_repaint_deadline = None;
         if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
             self.reveal_navigation_workspace = true;
@@ -211,6 +221,7 @@ impl ClientShellState {
             snapshot,
             &self.config,
             render::ShellRenderState {
+                space_groups: &self.space_groups,
                 machine_diagnostics: &self.machine_diagnostics,
                 endpoints: &self.endpoints,
                 active_endpoint_id: &self.active_endpoint_id,

@@ -571,6 +571,9 @@ impl ClientShellState {
             .snapshot
             .as_deref()
             .is_some_and(|previous| previous.boot_id != snapshot.boot_id);
+        if self.space_groups.reconcile(endpoint_id, &snapshot) {
+            self.persist_chrome_preferences(&mut ClientShellInput::default());
+        }
         if boot_changed {
             self.retire_endpoint_notifications(endpoint_id);
         }

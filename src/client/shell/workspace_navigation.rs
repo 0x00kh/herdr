@@ -126,7 +126,15 @@ impl ClientShellState {
                     self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
                         .unwrap_or(&empty_collapsed_groups)
                 };
-                render::workspace_entries(snapshot, collapsed_groups)
+                if mobile && surface_available {
+                    render::workspace_entries(snapshot, collapsed_groups)
+                } else {
+                    super::space_groups::visible_workspaces(
+                        snapshot,
+                        collapsed_groups,
+                        self.space_groups.get(&endpoint.endpoint_id),
+                    )
+                }
             };
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {

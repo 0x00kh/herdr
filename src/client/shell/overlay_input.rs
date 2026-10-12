@@ -934,8 +934,13 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Rename(rename)) = self.overlay.take() else {
             return;
         };
+        if matches!(rename.target, ClientRenameTarget::SpaceGroup { .. }) {
+            self.save_space_group_name(rename, outcome);
+            return;
+        }
         let trimmed = rename.input.trim();
         let method = match rename.target {
+            ClientRenameTarget::SpaceGroup { .. } => None,
             ClientRenameTarget::NewWorkspace {
                 source_workspace_id,
                 cwd,

@@ -226,7 +226,8 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let groups = state.space_groups.get(state.active_endpoint_id);
+    let entries = super::space_groups::rows(snapshot, state.collapsed_groups, groups);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -239,6 +240,9 @@ pub(crate) fn render_sidebar(
     let row_heights = entries
         .iter()
         .map(|entry| {
+            let Some(entry) = entry.workspace() else {
+                return 1;
+            };
             snapshot
                 .workspaces
                 .get(entry.index)
@@ -260,9 +264,10 @@ pub(crate) fn render_sidebar(
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
+            entries.get(index + 1).map_or(0, |next| {
+                u16::from(next.workspace().is_none_or(|entry| !entry.indented))
+                    * config.spaces.row_gap
+            })
         })
         .collect::<Vec<_>>();
     let mut metrics = super::scroll::list_scroll_metrics(
@@ -271,11 +276,21 @@ pub(crate) fn render_sidebar(
         body.height,
         *state.workspace_scroll,
     );
-    if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+    let reveal_navigation = !body.is_empty() && std::mem::take(state.reveal_navigation_workspace);
+    let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
+    if reveal_navigation || reveal_focus {
+        if let Some(target) = entries.iter().position(|row| {
+            row.workspace().is_some_and(|entry| {
+                let workspace = &snapshot.workspaces[entry.index];
+                if reveal_navigation {
+                    state.selected_workspace_id.is_some_and(|target| {
+                        target.matches(state.active_endpoint_id, &workspace.workspace_id)
+                    })
+                } else {
+                    workspace.focused
+                }
+            })
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -299,7 +314,23 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+    for (entry_position, row) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+        if y >= body.bottom() {
+            break;
+        }
+        let super::space_groups::SpaceRow::Workspace { entry, grouped } = row else {
+            super::space_groups::render_header(
+                buffer,
+                Rect::new(body.x, y, content_width, 1),
+                row,
+                groups,
+                state.active_endpoint_id,
+                config,
+                hits,
+            );
+            y = y.saturating_add(1 + gaps[entry_position]);
+            continue;
+        };
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
@@ -310,6 +341,13 @@ pub(crate) fn render_sidebar(
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
+        let indent = u16::from(*grouped) * 2;
+        let content_rect = Rect::new(
+            rect.x + indent,
+            rect.y,
+            rect.width.saturating_sub(indent),
+            rect.height,
+        );
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
@@ -323,7 +361,7 @@ pub(crate) fn render_sidebar(
         }
         render_workspace_rows(
             buffer,
-            rect,
+            content_rect,
             status,
             config.status_indicators,
             entry,
@@ -349,9 +387,9 @@ pub(crate) fn render_sidebar(
             indented: entry.indented,
             group_toggle,
         });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
+        let gap = entries.get(entry_position + 1).map_or(0, |next| {
+            u16::from(next.workspace().is_none_or(|entry| !entry.indented)) * config.spaces.row_gap
+        });
         y = y.saturating_add(row_height + gap);
     }
 

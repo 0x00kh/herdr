@@ -13,6 +13,7 @@ impl ClientShellState {
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
         press.endpoint_id == self.active_endpoint_id
+            && self.space_groups.get(&press.endpoint_id).is_empty()
             && self
                 .snapshot
                 .as_deref()
@@ -122,7 +123,20 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
+                            let entries = if !self.mobile_layout_active()
+                                && !self.sidebar_collapsed
+                                && !self.space_groups.get(&endpoint.endpoint_id).is_empty()
+                            {
+                                super::space_groups::visible_workspaces(
+                                    snapshot,
+                                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                                        .unwrap_or(&HashSet::new()),
+                                    self.space_groups.get(&endpoint.endpoint_id),
+                                )
+                            } else {
+                                render::workspace_entries(snapshot, &HashSet::new())
+                            };
+                            entries
                                 .into_iter()
                                 .filter_map(|entry| {
                                     snapshot.workspaces.get(entry.index).map(|workspace| {
